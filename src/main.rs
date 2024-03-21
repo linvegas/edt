@@ -1,8 +1,9 @@
-use std::io::{stdout, Write, Stdout};
 use std::env;
 use std::fs::File;
-use std::io::BufReader;
-use std::io::BufRead;
+use std::io::{
+    self, stdout,
+    Write, Stdout, BufReader, BufRead,
+};
 
 use crossterm::{
     terminal, cursor,
@@ -30,51 +31,143 @@ enum Action {
 
 struct Buffer {
     lines: Vec<String>,
-    c_row: usize,
-    c_row_virt: usize,
-    c_col: usize,
-    c_col_prev: usize,
+    name: String,
 }
 
 impl Buffer {
-    fn new(content: Vec<String>) -> Self {
-        let mut lines: Vec<String> = vec![String::new()];
-        if !content.is_empty() {
-            lines = content
-        }
+    fn from_file(filepath: &str) -> Self {
+        let file = File::open(filepath).unwrap();
+        let file = BufReader::new(file);
+        let content = file.lines().map(|line| line.unwrap()).collect();
         Self {
-            // lines: vec![
-            //     String::from("#include <stdio.h>"),
-            //     String::from(""),
-            //     String::from("int main() {"),
-            //     String::from("    printf(\"Le Rust\\n\");"),
-            //     String::from("    return 0;"),
-            //     String::from("}"),
-            // ],
-            lines: lines,
-            c_row: 0, c_col: 0, c_col_prev: 0, c_row_virt: 0,
+            lines: content, name: filepath.to_string(),
         }
     }
 
-    fn insert_new_line(&mut self) {
-        let prev_line_indent = self.lines[self.c_row]
-            .chars()
-            .take_while(|c| c.is_whitespace() && *c != '\n')
-            .map(|c| c.len_utf8())
-            .sum();
-        self.lines.insert(self.c_row + 1, String::from(" ".repeat(prev_line_indent)));
-        self.c_row += 1;
-        self.c_col = prev_line_indent;
+    // fn insert_new_line(&mut self) {
+    //     let prev_line_indent = self.lines[self.c_row]
+    //         .chars()
+    //         .take_while(|c| c.is_whitespace() && *c != '\n')
+    //         .map(|c| c.len_utf8())
+    //         .sum();
+    //     self.lines.insert(self.c_row + 1, String::from(" ".repeat(prev_line_indent)));
+    //     self.c_row += 1;
+    //     self.c_col = prev_line_indent;
+    // }
+
+    // fn insert_char(c_row: &Editor.c_row, c_col: &Editor.c_col, c: char) {
+    //     lines[c_row].insert(c_col, c);
+    //     self.c_col += 1;
+    // }
+
+    // fn delete_char(&mut self) {
+    //     self.lines[self.c_row].remove(self.c_col - 1);
+    //     self.c_col -= 1;
+    // }
+}
+
+struct Editor {
+    mode: Mode,
+    stdout: Stdout,
+    c_row: usize,
+    c_col: usize,
+    c_col_prev: usize,
+    size_col: u16,
+    size_row: u16,
+    scroll: usize,
+    buffer: Buffer,
+}
+
+impl Editor {
+    fn new(buffer: Buffer) -> Self {
+        let mut stdout = stdout();
+        let (size_col, size_row) = terminal::size().unwrap();
+
+        stdout
+            .execute(terminal::EnterAlternateScreen).unwrap()
+            .execute(terminal::Clear(terminal::ClearType::All)).unwrap();
+
+        terminal::enable_raw_mode().unwrap();
+
+        Self {
+            mode: Mode::Normal,
+            stdout, size_col, size_row,
+            c_row: 0, c_col: 0, c_col_prev: 0,
+            buffer, scroll: 0,
+        }
     }
+
+    fn render(&mut self) {
+        self.stdout.execute(terminal::Clear(terminal::ClearType::All)).unwrap();
+
+        self.render_statuslines();
+        self.render_buffer();
+
+        self.stdout.queue(cursor::MoveTo(self.c_col as u16, self.c_row as u16)).unwrap();
+
+        self.stdout.flush().unwrap();
+    }
+
+    fn render_buffer(&mut self) {
+        for i in 0..self.size_row - 1 {
+            let line =  match self.buffer.lines.get(i as usize + self.scroll) {
+                None => String::new(),
+                Some(s) => s.to_string(),
+            };
+            self.stdout
+                .queue(cursor::MoveTo(0, i as u16)).unwrap()
+                .queue(style::Print(line)).unwrap();
+        }
+        // for (i, line) in self.buffer.lines.iter().enumerate() {
+        //     if i < (self.size_row - 1).into() {
+        //         self.stdout.queue(cursor::MoveTo(0, i as u16)).unwrap();
+        //         self.stdout.queue(style::Print(line)).unwrap();
+        //     }
+        // }
+    }
+
+    fn render_statuslines(&mut self) {
+        let current_mode = match self.mode {
+            Mode::Normal => "NOR",
+            Mode::Insert => "INS",
+        };
+
+        self.stdout
+            .queue(cursor::MoveTo(0, self.size_row)).unwrap()
+            .queue(style::Print(" ".repeat(self.size_col as usize).on(Color::DarkMagenta))).unwrap();
+
+        self.stdout
+            .queue(cursor::MoveTo(1, self.size_row)).unwrap()
+            .queue(style::Print(current_mode.with(Color::Black).on(Color::DarkMagenta).bold())).unwrap();
+
+        self.stdout
+            .queue(cursor::MoveTo((current_mode.len() + 3).try_into().unwrap(), self.size_row)).unwrap()
+            .queue(style::Print(self.buffer.name.to_string().with(Color::Black).on(Color::DarkMagenta).bold())).unwrap();
+    }
+
+    // fn v_height(&mut self) -> u16 {
+    //     self.size_row - 2
+    // }
 
     fn insert_char(&mut self, c: char) {
-        self.lines[self.c_row].insert(self.c_col, c);
+        self.buffer.lines[self.c_row].insert(self.c_col, c);
         self.c_col += 1;
     }
 
     fn delete_char(&mut self) {
-        self.lines[self.c_row].remove(self.c_col - 1);
+        self.buffer.lines[self.c_row].remove(self.c_col - 1);
         self.c_col -= 1;
+    }
+
+    fn insert_new_line(&mut self) {
+        let prev_line_indent = self.buffer.lines[self.c_row]
+            .chars()
+            .take_while(|c| c.is_whitespace() && *c != '\n')
+            .map(|c| c.len_utf8())
+            .sum();
+        self.buffer.lines.insert(self.c_row + 1, String::from(" ".repeat(prev_line_indent)));
+        self.c_row += 1;
+        self.c_col = prev_line_indent;
     }
 }
 
@@ -122,132 +215,79 @@ fn handle_insert_mode(event: Event, _stdout: &mut Stdout) -> Option<Action> {
     }
 }
 
-fn draw_statusline(stdout: &mut Stdout, rows: u16, cols: u16, mode: &mut Mode) -> Result<(), std::io::Error> {
-    let current_mode = match mode {
-        Mode::Normal => "NOR",
-        Mode::Insert => "INS",
-    };
-
-    stdout.queue(cursor::MoveTo(0, rows))?;
-    stdout.queue(style::Print(" ".repeat(cols as usize).with(Color::White).on(Color::DarkGrey)))?;
-    stdout.queue(cursor::MoveTo(1, rows))?;
-    stdout.queue(style::Print(current_mode.with(Color::White).on(Color::DarkGrey).bold()))?;
-    // stdout.flush()?;
-
-    Ok(())
-}
-
-fn main() -> std::io::Result<()> {
+fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let mut filepath = "";
+    let filepath = &args[1];
 
-    let mut buf_content: Vec<String> = vec![String::new()];
+    let buf = Buffer::from_file(filepath);
 
-    match args.len() {
-        1 => {},
-        2 => filepath = &args[1],
-        _ => {},
-    }
-
-    if !filepath.is_empty() {
-        let file = File::open(filepath)?;
-        let file = BufReader::new(file);
-
-        buf_content = file.lines().map(|line| line.unwrap()).collect();
-    }
-
-    let mut buf = Buffer::new(buf_content);
-
-    buf.c_row = 0;
-    buf.c_col = 0;
-
-    let mut stdout = stdout();
-
-    stdout.execute(terminal::EnterAlternateScreen)?;
-    terminal::enable_raw_mode()?;
-
-    stdout.execute(terminal::Clear(terminal::ClearType::All))?;
-
-    let (mut cols, mut rows) = terminal::size()?;
-
-    let mut mode = Mode::Normal;
+    let mut edt = Editor::new(buf);
 
     loop {
-        stdout.execute(terminal::Clear(terminal::ClearType::All))?;
-        draw_statusline(&mut stdout, rows, cols, &mut mode)?;
+        edt.render();
 
-        let limit = buf.c_row_virt.checked_sub((rows - 2).into()).unwrap_or(0);
-        for (i, line) in buf.lines.iter().skip(limit).enumerate() {
-            if i < (rows - 1).into() {
-                stdout.queue(cursor::MoveTo(0, i as u16))?;
-                stdout.queue(style::Print(line))?;
-            }
-        }
-
-        stdout.queue(cursor::MoveTo(buf.c_col as u16, buf.c_row as u16))?;
-        stdout.flush()?;
-
-        if let Some(action) = handle_event(&mode, &mut stdout, &mut cols, &mut rows, read()?) {
+        // TODO: Move this code to Editor
+        if let Some(action) = handle_event(&edt.mode, &mut edt.stdout, &mut edt.size_col, &mut edt.size_row, read()?) {
             match action {
                 Action::Quit => break,
                 Action::MoveLeft => {
-                    buf.c_col = buf.c_col.saturating_sub(1);
-                    buf.c_col_prev = buf.c_col;
+                    edt.c_col = edt.c_col.saturating_sub(1);
+                    edt.c_col_prev = edt.c_col;
                 },
                 Action::MoveRight => {
-                    if buf.c_col < buf.lines[buf.c_row].len() {
-                        buf.c_col += 1;
-                        buf.c_col_prev = buf.c_col;
+                    if usize::from(edt.c_col) < edt.buffer.lines[edt.c_row as usize].len() {
+                        edt.c_col += 1;
+                        edt.c_col_prev = edt.c_col;
                     }
                     // buf.c_col = buf.c_col.saturating_sub(1),
                 },
                 Action::MoveUp => {
-                    if buf.c_row > 0 {
-                        buf.c_row -= 1;
+                    if edt.c_row > 0 {
+                        edt.c_row -= 1;
                     } else {
-                        buf.c_row_virt -= 1;
+                        edt.scroll -= 1
                     }
-                    if buf.lines[buf.c_row].len() == 0 {
-                        buf.c_col = 0;
+                    if edt.buffer.lines[edt.c_row].len() == 0 {
+                        edt.c_col = 0;
                     } else {
-                        buf.c_col = buf.c_col_prev;
+                        edt.c_col = edt.c_col_prev;
                     }
-                    if buf.c_col > buf.lines[buf.c_row].len() {
-                        buf.c_col = buf.lines[buf.c_row].len();
+                    if edt.c_col > edt.buffer.lines[edt.c_row as usize].len() {
+                        edt.c_col = edt.buffer.lines[edt.c_row as usize].len();
                     }
                 },
                 Action::MoveDown => {
-                    if buf.c_row < (rows - 2).into() {
-                        buf.c_row += 1;
-                        buf.c_row_virt += 1;
+                    if edt.c_row < (edt.size_row - 2).into() {
+                        edt.c_row += 1;
                     } else {
-                        buf.c_row_virt += 1;
+                        edt.scroll += 1
                     }
-                    if buf.lines[buf.c_row].len() == 0 {
-                        buf.c_col = 0;
+                    if edt.buffer.lines[edt.c_row as usize].len() == 0 {
+                        edt.c_col = 0;
                     } else {
-                        buf.c_col = buf.c_col_prev;
+                        edt.c_col = edt.c_col_prev;
                     }
-                    if buf.c_col > buf.lines[buf.c_row].len() {
-                        buf.c_col = buf.lines[buf.c_row].len();
+                    if usize::from(edt.c_col) > edt.buffer.lines[edt.c_row as usize].len() {
+                        edt.c_col = edt.buffer.lines[edt.c_row as usize].len();
                     }
                 },
                 Action::InsertNewLine => {
-                    match mode {
-                        Mode::Normal => mode = Mode::Insert,
+                    match edt.mode {
+                        Mode::Normal => edt.mode = Mode::Insert,
                         _ => {}
                     }
-                    buf.insert_new_line();
+                    edt.insert_new_line();
                 }
-                Action::ChangeMode(m) => mode = m,
-                Action::InsertChar(c) => buf.insert_char(c),
-                Action::DeleteChar => buf.delete_char(),
+                Action::ChangeMode(m) => edt.mode = m,
+                Action::InsertChar(c) => edt.insert_char(c),
+                Action::DeleteChar => edt.delete_char(),
             }
         }
     }
 
-    stdout.execute(terminal::LeaveAlternateScreen)?;
+    // TODO: Implement le Drop
+    edt.stdout.execute(terminal::LeaveAlternateScreen).unwrap();
     terminal::disable_raw_mode()?;
 
     Ok(())
