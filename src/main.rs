@@ -1,4 +1,8 @@
 use std::io::{stdout, Write, Stdout};
+use std::env;
+use std::fs::File;
+use std::io::BufReader;
+use std::io::BufRead;
 
 use crossterm::{
     terminal, cursor,
@@ -27,22 +31,28 @@ enum Action {
 struct Buffer {
     lines: Vec<String>,
     c_row: usize,
+    c_row_virt: usize,
     c_col: usize,
     c_col_prev: usize,
 }
 
 impl Buffer {
-    fn new() -> Self {
+    fn new(content: Vec<String>) -> Self {
+        let mut lines: Vec<String> = vec![String::new()];
+        if !content.is_empty() {
+            lines = content
+        }
         Self {
-            lines: vec![
-                String::from("#include <stdio.h>"),
-                String::from(""),
-                String::from("int main() {"),
-                String::from("    printf(\"Le Rust\\n\");"),
-                String::from("    return 0;"),
-                String::from("}"),
-            ],
-            c_row: 0, c_col: 0, c_col_prev: 0,
+            // lines: vec![
+            //     String::from("#include <stdio.h>"),
+            //     String::from(""),
+            //     String::from("int main() {"),
+            //     String::from("    printf(\"Le Rust\\n\");"),
+            //     String::from("    return 0;"),
+            //     String::from("}"),
+            // ],
+            lines: lines,
+            c_row: 0, c_col: 0, c_col_prev: 0, c_row_virt: 0,
         }
     }
 
@@ -128,6 +138,30 @@ fn draw_statusline(stdout: &mut Stdout, rows: u16, cols: u16, mode: &mut Mode) -
 }
 
 fn main() -> std::io::Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    let mut filepath = "";
+
+    let mut buf_content: Vec<String> = vec![String::new()];
+
+    match args.len() {
+        1 => {},
+        2 => filepath = &args[1],
+        _ => {},
+    }
+
+    if !filepath.is_empty() {
+        let file = File::open(filepath)?;
+        let file = BufReader::new(file);
+
+        buf_content = file.lines().map(|line| line.unwrap()).collect();
+    }
+
+    let mut buf = Buffer::new(buf_content);
+
+    buf.c_row = 0;
+    buf.c_col = 0;
+
     let mut stdout = stdout();
 
     stdout.execute(terminal::EnterAlternateScreen)?;
@@ -139,18 +173,16 @@ fn main() -> std::io::Result<()> {
 
     let mut mode = Mode::Normal;
 
-    let mut buf = Buffer::new();
-
-    buf.c_row = 0;
-    buf.c_col = 0;
-
     loop {
         stdout.execute(terminal::Clear(terminal::ClearType::All))?;
         draw_statusline(&mut stdout, rows, cols, &mut mode)?;
 
-        for (i, line) in buf.lines.iter().enumerate() {
-            stdout.queue(cursor::MoveTo(0, i as u16))?;
-            stdout.queue(style::Print(line))?;
+        let limit = buf.c_row_virt.checked_sub((rows - 2).into()).unwrap_or(0);
+        for (i, line) in buf.lines.iter().skip(limit).enumerate() {
+            if i < (rows - 1).into() {
+                stdout.queue(cursor::MoveTo(0, i as u16))?;
+                stdout.queue(style::Print(line))?;
+            }
         }
 
         stdout.queue(cursor::MoveTo(buf.c_col as u16, buf.c_row as u16))?;
@@ -173,6 +205,8 @@ fn main() -> std::io::Result<()> {
                 Action::MoveUp => {
                     if buf.c_row > 0 {
                         buf.c_row -= 1;
+                    } else {
+                        buf.c_row_virt -= 1;
                     }
                     if buf.lines[buf.c_row].len() == 0 {
                         buf.c_col = 0;
@@ -184,7 +218,12 @@ fn main() -> std::io::Result<()> {
                     }
                 },
                 Action::MoveDown => {
-                    buf.c_row += 1;
+                    if buf.c_row < (rows - 2).into() {
+                        buf.c_row += 1;
+                        buf.c_row_virt += 1;
+                    } else {
+                        buf.c_row_virt += 1;
+                    }
                     if buf.lines[buf.c_row].len() == 0 {
                         buf.c_col = 0;
                     } else {
