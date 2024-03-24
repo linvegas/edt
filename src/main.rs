@@ -22,6 +22,7 @@ enum Action {
     MoveUp,
     MoveRight,
     MoveDown,
+    MoveToLineBegin,
     DeleteChar,
     InsertNewLine,
     ChangeMode(Mode),
@@ -72,8 +73,8 @@ struct Editor {
     c_row: usize,
     c_col: usize,
     c_col_prev: usize,
-    size_col: u16,
-    size_row: u16,
+    size_cols: u16,
+    size_rows: u16,
     scroll: usize,
     buffer: Buffer,
 }
@@ -81,7 +82,7 @@ struct Editor {
 impl Editor {
     fn new(buffer: Buffer) -> Self {
         let mut stdout = stdout();
-        let (size_col, size_row) = terminal::size().unwrap();
+        let (size_cols, size_rows) = terminal::size().unwrap();
 
         stdout
             .execute(terminal::EnterAlternateScreen).unwrap()
@@ -91,10 +92,18 @@ impl Editor {
 
         Self {
             mode: Mode::Normal,
-            stdout, size_col, size_row,
+            stdout, size_cols, size_rows,
             c_row: 0, c_col: 0, c_col_prev: 0,
             buffer, scroll: 0,
         }
+    }
+
+    fn v_height(&self) -> usize {
+        self.size_rows as usize - 1
+    }
+
+    fn v_width(&self) -> usize {
+        self.size_cols as usize
     }
 
     fn render(&mut self) {
@@ -109,17 +118,23 @@ impl Editor {
     }
 
     fn render_buffer(&mut self) {
-        for i in 0..self.size_row - 1 {
-            let line =  match self.buffer.lines.get(i as usize + self.scroll) {
+        for i in 0..self.v_height() {
+            let mut line =  match self.buffer.lines.get(i as usize + self.scroll) {
                 None => String::new(),
                 Some(s) => s.to_string(),
             };
+            // let mut v_line = line;
+            if line.len() >= self.v_width() {
+                line = format!("{}", line)
+            } else {
+                line = format!("{:<width$}", line, width = self.v_width())
+            }
             self.stdout
                 .queue(cursor::MoveTo(0, i as u16)).unwrap()
                 .queue(style::Print(line)).unwrap();
         }
         // for (i, line) in self.buffer.lines.iter().enumerate() {
-        //     if i < (self.size_row - 1).into() {
+        //     if i < (self.size_rows - 1).into() {
         //         self.stdout.queue(cursor::MoveTo(0, i as u16)).unwrap();
         //         self.stdout.queue(style::Print(line)).unwrap();
         //     }
@@ -133,39 +148,61 @@ impl Editor {
         };
 
         self.stdout
-            .queue(cursor::MoveTo(0, self.size_row)).unwrap()
-            .queue(style::Print(" ".repeat(self.size_col as usize).on(Color::DarkMagenta))).unwrap();
+            .queue(cursor::MoveTo(0, self.size_rows)).unwrap()
+            .queue(style::Print(" ".repeat(self.size_cols as usize).on(Color::DarkMagenta))).unwrap();
 
         self.stdout
-            .queue(cursor::MoveTo(1, self.size_row)).unwrap()
+            .queue(cursor::MoveTo(1, self.size_rows)).unwrap()
             .queue(style::Print(current_mode.with(Color::Black).on(Color::DarkMagenta).bold())).unwrap();
 
         self.stdout
-            .queue(cursor::MoveTo((current_mode.len() + 3).try_into().unwrap(), self.size_row)).unwrap()
+            .queue(cursor::MoveTo((current_mode.len() + 3).try_into().unwrap(), self.size_rows)).unwrap()
             .queue(style::Print(self.buffer.name.to_string().with(Color::Black).on(Color::DarkMagenta).bold())).unwrap();
     }
 
     // fn v_height(&mut self) -> u16 {
-    //     self.size_row - 2
+    //     self.size_rows - 2
     // }
 
+    fn current_line(&mut self) -> (&mut String, usize) {
+        match self.buffer.lines.get_mut(self.c_row + self.scroll) {
+            Some(line) => (line, self.c_col),
+            None => todo!(),
+        }
+    }
+
+    // fn get_current_line(&mut self) -> &mut String {
+    //     let (line, _col) = self.current_line();
+    //     line
+    // }
+
+    fn get_current_line_len(&mut self) -> usize {
+        let (line, _col) = self.current_line();
+        line.len()
+    }
+
     fn insert_char(&mut self, c: char) {
-        self.buffer.lines[self.c_row].insert(self.c_col, c);
+        let (line, col) = self.current_line();
+        line.insert(col, c);
         self.c_col += 1;
+        self.c_col_prev = self.c_col;
     }
 
     fn delete_char(&mut self) {
-        self.buffer.lines[self.c_row].remove(self.c_col - 1);
+        let (line, col) = self.current_line();
+        line.remove(col - 1);
         self.c_col -= 1;
+        self.c_col_prev = self.c_col;
     }
 
     fn insert_new_line(&mut self) {
-        let prev_line_indent = self.buffer.lines[self.c_row]
+        let (line, _col) = self.current_line();
+        let prev_line_indent = line
             .chars()
             .take_while(|c| c.is_whitespace() && *c != '\n')
             .map(|c| c.len_utf8())
             .sum();
-        self.buffer.lines.insert(self.c_row + 1, String::from(" ".repeat(prev_line_indent)));
+        self.buffer.lines.insert(self.c_row + self.scroll + 1, String::from(" ".repeat(prev_line_indent)));
         self.c_row += 1;
         self.c_col = prev_line_indent;
     }
@@ -191,6 +228,8 @@ fn handle_normal_mode(event: Event) -> Option<Action> {
 
             KeyCode::Char('i') => Some(Action::ChangeMode(Mode::Insert)),
             KeyCode::Char('o') => Some(Action::InsertNewLine),
+
+            KeyCode::Char('0') => Some(Action::MoveToLineBegin),
 
             KeyCode::Char('h') | KeyCode::Left  => Some(Action::MoveLeft),
             KeyCode::Char('l') | KeyCode::Right => Some(Action::MoveRight),
@@ -228,7 +267,7 @@ fn main() -> io::Result<()> {
         edt.render();
 
         // TODO: Move this code to Editor
-        if let Some(action) = handle_event(&edt.mode, &mut edt.stdout, &mut edt.size_col, &mut edt.size_row, read()?) {
+        if let Some(action) = handle_event(&edt.mode, &mut edt.stdout, &mut edt.size_cols, &mut edt.size_rows, read()?) {
             match action {
                 Action::Quit => break,
                 Action::MoveLeft => {
@@ -236,7 +275,7 @@ fn main() -> io::Result<()> {
                     edt.c_col_prev = edt.c_col;
                 },
                 Action::MoveRight => {
-                    if usize::from(edt.c_col) < edt.buffer.lines[edt.c_row as usize].len() {
+                    if usize::from(edt.c_col) < edt.get_current_line_len() {
                         edt.c_col += 1;
                         edt.c_col_prev = edt.c_col;
                     }
@@ -245,32 +284,36 @@ fn main() -> io::Result<()> {
                 Action::MoveUp => {
                     if edt.c_row > 0 {
                         edt.c_row -= 1;
-                    } else {
+                    } else if edt.scroll > 0 {
                         edt.scroll -= 1
                     }
-                    if edt.buffer.lines[edt.c_row].len() == 0 {
+                    if edt.get_current_line_len() == 0 {
                         edt.c_col = 0;
                     } else {
                         edt.c_col = edt.c_col_prev;
                     }
-                    if edt.c_col > edt.buffer.lines[edt.c_row as usize].len() {
-                        edt.c_col = edt.buffer.lines[edt.c_row as usize].len();
+                    if edt.c_col > edt.get_current_line_len() {
+                        edt.c_col = edt.get_current_line_len();
                     }
                 },
                 Action::MoveDown => {
-                    if edt.c_row < (edt.size_row - 2).into() {
+                    if edt.c_row < (edt.size_rows - 2).into() {
                         edt.c_row += 1;
                     } else {
                         edt.scroll += 1
                     }
-                    if edt.buffer.lines[edt.c_row as usize].len() == 0 {
+                    if edt.get_current_line_len() == 0 {
                         edt.c_col = 0;
                     } else {
                         edt.c_col = edt.c_col_prev;
                     }
-                    if usize::from(edt.c_col) > edt.buffer.lines[edt.c_row as usize].len() {
-                        edt.c_col = edt.buffer.lines[edt.c_row as usize].len();
+                    if usize::from(edt.c_col) > edt.get_current_line_len() {
+                        edt.c_col = edt.get_current_line_len();
                     }
+                },
+                Action::MoveToLineBegin => {
+                    edt.c_col = 0;
+                    edt.c_col_prev = 0;
                 },
                 Action::InsertNewLine => {
                     match edt.mode {
@@ -278,7 +321,7 @@ fn main() -> io::Result<()> {
                         _ => {}
                     }
                     edt.insert_new_line();
-                }
+                },
                 Action::ChangeMode(m) => edt.mode = m,
                 Action::InsertChar(c) => edt.insert_char(c),
                 Action::DeleteChar => edt.delete_char(),
